@@ -1,0 +1,870 @@
+---
+title: "Disaster Relief Project: Part I"
+author: "Kelly Farrell"
+date: "August 15, 2021"
+output: 
+  html_document:
+    number_sections: true
+    toc: true
+    toc_float: true
+  
+---
+
+**DS 6030 | Spring 2021 | University of Virginia **
+
+*******************************************
+
+# Introduction 
+
+In the aftermath of a catastrophic earthquake in Haiti in the year 2010, rescue efforts were obstructed by difficulties in locating and providing aid to survivors. Due to infrastructure issues such as downed power lines, communication was made difficult or impossible, and ground transportation was limited by the amount of debris blocking roadways. Images were collected by Rochester Institute of Technology helicopters in order to try to locate makeshift shelters erected by survivors, but there were not enough workers to manually search each image for signs of people who urgently required food, water, and medical assistance.
+
+Five binary classification methods were developed to more efficiently and accurately identify the shelters, which are identifiable by the bright blue tarps used to build them. If a program could quickly determine which images showed areas with survivors, and which did not, then workers could focus their work on reaching survivors and distributing necessary resources rather than studying photos. These classifiers were built with the goal to maximize the true positive rate (the ratio of correctly-identified blue tarps to correctly-identified blue tarps and tarps that were not identified by the model) and the overall accuracy based on a dataset containing only the red, green, and blue signal values of images captured by RIT. 
+
+# Exploratory Data Analysis
+##Training Datasets
+```{r, data-loading, warning=FALSE, message=FALSE, cache=TRUE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+library(tidyverse)
+pixels <- read.csv("HaitiPixels.csv", header = T, stringsAsFactors = FALSE)
+library(GGally)
+library(caret)
+library(ggplot2)
+```
+
+When examining the dataset, my first goal was to determine the distribution of object classes such as Blue Tarp, Vegetation, and Rooftops.
+
+```{r}
+ggplot(data=pixels, mapping = aes(x=Class, fill=Class)) + 
+  geom_bar() + 
+  ggtitle(label="Frequency of Each Object Class") + 
+  theme(plot.title=element_text(hjust = .5))
+```
+A simple plot of the count of observations shows that the target class, Blue Tarp contains only a very small percentage of the total observations. This is important to note when visualizing and analyzing the data.
+
+My next goal was to determine if a suitable separation or decision boundary was present between Blue Tarp and the other object classes. If the Red, Green, and Blue pixel saturation in tarp-containing photos is not sufficiently distinct, then classifying them may not be successful enough to be used in rescue efforts.
+
+```{r, fig.width=6,fig.height=8}
+#violin plots formatted based using this link and the ggplot2 docs for guidance: http://www.sthda.com/english/wiki/ggplot2-violin-plot-quick-start-guide-r-software-and-data-visualization  
+library(gridExtra)
+
+x <- ggplot(data=pixels, mapping=aes(x=Class, y=Blue, fill=Class)) + 
+  geom_violin(scale="width", trim = FALSE) + 
+  geom_boxplot(width=0.03, fill="white") + 
+  coord_cartesian(ylim = c(25,275)) +
+  theme(legend.position = "none")
+
+y <- ggplot(data=pixels, mapping=aes(x=Class, y=Red, fill=Class)) + 
+  geom_violin(scale="width", trim = FALSE) +
+  geom_boxplot(width=0.03, fill="white") +
+  coord_cartesian(ylim = c(25,275)) +
+  theme(legend.position = "none")
+
+z <- ggplot(data=pixels, mapping=aes(x=Class, y=Green, fill=Class)) + 
+  geom_violin(scale="width", trim = FALSE) +
+  geom_boxplot(width=0.03, fill="white") +
+  coord_cartesian(ylim = c(25,275)) +
+  theme(legend.position = "none")
+
+grid.arrange(y,z,x, ncol = 1, top="Red, Green, and Blue Pixel Density by Object Class")
+```
+In order to visualize the distribution of Red, Green, and Blue values across classes, I had to scale for the size of each class (otherwise the Tarp class was too small to be visible). Other than vegetation, which has a narrow range of values of all three predictors, it seems that all classes have a lot of overlap--it may not be possible to capture the complexity of the class designations by a univariate model alone without dimension reduction.
+
+```{r}
+a <- ggplot(data=pixels, mapping=aes(x=Red, y=Green, color=Class)) + 
+  geom_point(alpha = 1/5)
+b <- ggplot(data=pixels, mapping=aes(x=Red, y=Blue, color=Class)) + 
+  geom_point(alpha = 1/5)
+c <- ggplot(data=pixels, mapping=aes(x=Blue, y=Green, color=Class)) + 
+  geom_point(alpha = 1/5)
+a
+b
+c
+```
+Despite the observations above, it does appear that Blue Tarp class has a somewhat distinct separation from the other classes in each combination of 2 variables, while the other classes consistently overlap with each other. This indicates that a binary classification of Tarps in comparison with NonTarps is appropriate.  For a more detailed look at the decision boundaries in three-dimensional space, I reduced all the classes aside from "Blue Tarp" to a "NonTarp" group, and "Blue Tarp" to "Tarp" for simplicity. Then, I used a 3-D scatter plot using the plotly package to visualize the separation between the new binary variables.
+
+```{r}
+pixtrain <- pixels
+pixtrain$Class[pixtrain$Class!="Blue Tarp"] <- "NonTarp"
+pixtrain$Class[pixtrain$Class=="Blue Tarp"] <- "Tarp"
+```
+
+```{r}
+ggplot(data=pixtrain, mapping = aes(x=Class, fill=Class)) + 
+  geom_bar() + 
+  ggtitle(label="Frequency of Tarps to Non-Tarps") + 
+  theme(plot.title=element_text(hjust = .5))
+
+#3D plot
+library(plotly)
+fig <- plot_ly(pixtrain, 
+               x = ~Red, 
+               y = ~Green, 
+               z = ~Blue, 
+               color = ~Class, 
+               type = "scatter3d", 
+               marker = list(symbol = 'circle'), 
+               size = 0.2, 
+               opacity = 0.2)
+fig
+```
+While not perfectly separate, there is a distinction between tarps and non-tarps, making this a good classification problem.  I will attempt to solve the problem of identifying tarps (an indicator of dwellings/makeshift shelters erected by earthquake survivors) using binary logistic regression, LDA, QDA, K-Nearest Neighbors, and a penalized logistic regression.
+
+##Holdout Data
+###Loading Data
+```{r}
+new <- unzip("Hold+Out+Data.zip")
+new
+
+#Reading in datasets that contain non-tarp data
+files <- c(1,4,6,11)
+holdout_nontarps <- data.frame()
+for (i in files){
+  t <- read.table(new[i],
+                  skip=8, #First 8 lines contain garbage
+                  header = FALSE)
+  holdout_nontarps <- rbind(holdout_nontarps, t)
+}
+
+#Removing excess columns
+holdout_nontarps <- holdout_nontarps[,8:10]
+#Assigning class value
+holdout_nontarps$Class <- "NonTarp"
+
+#Reading in tarp datasets
+files2 <- c(2,5,10)
+holdout_tarps <- data.frame()
+for (i in files2){
+  t <- read.table(new[i],
+                  skip=8, #First 8 lines contain garbage
+                  header = FALSE)
+  holdout_tarps <- rbind(holdout_tarps, t)
+}
+
+#Removing excess columns
+holdout_tarps <- holdout_tarps[,8:10]
+#Assigning class value
+holdout_tarps$Class <- "Tarp"
+
+#Merging tarp + nontarp data
+holdout <- rbind(holdout_nontarps, holdout_tarps)
+head(holdout)
+```
+
+###Determining Correct Variable Labels
+Distributions of the Red, Green, and Blue variables were assessed visually in comparison with the 3 unknown color variables from the holdout dataset. Both central tendency data (represented by the boxplot embedded in the violin) and overall distribution were considered. 
+```{r}
+#Getting binary class from original dataset
+rgb <- pixels
+rgb$Class[rgb$Class!="Blue Tarp"] <- "NonTarp"
+rgb$Class[rgb$Class=="Blue Tarp"] <- "Tarp"
+
+#no, I don't want to explain my variable names, there was 0 logic here
+x <- ggplot(data=holdout, 
+            mapping=aes(x=Class, y=V10, fill=Class)) + 
+  geom_violin(scale="width", trim = FALSE) + 
+  geom_boxplot(width=0.03, fill="white") + 
+  coord_cartesian(ylim = c(25,275)) +
+  theme(legend.position = "none")
+
+y <- ggplot(data=rgb, 
+            mapping=aes(x=Class, y=Blue, fill=Class)) + 
+  geom_violin(scale="width", trim = FALSE) + 
+  geom_boxplot(width=0.03, fill="white") + 
+  coord_cartesian(ylim = c(25,275)) +
+  theme(legend.position = "none")
+
+z <- ggplot(data=holdout, 
+            mapping=aes(x=Class, y=V8, fill=Class)) + 
+  geom_violin(scale="width", trim = FALSE) + 
+  geom_boxplot(width=0.03, fill="white") + 
+  coord_cartesian(ylim = c(25,275)) +
+  theme(legend.position = "none")
+
+a <- ggplot(data=rgb, 
+            mapping=aes(x=Class, y=Red, fill=Class)) + 
+  geom_violin(scale="width", trim = FALSE) + 
+  geom_boxplot(width=0.03, fill="white") + 
+  coord_cartesian(ylim = c(25,275)) +
+  theme(legend.position = "none")
+
+k <- ggplot(data=holdout, 
+            mapping=aes(x=Class, y=V9, fill=Class)) + 
+  geom_violin(scale="width", trim = FALSE) + 
+  geom_boxplot(width=0.03, fill="white") + 
+  coord_cartesian(ylim = c(25,275)) +
+  theme(legend.position = "none")
+
+b <- ggplot(data=rgb, 
+            mapping=aes(x=Class, y=Green, fill=Class)) + 
+  geom_violin(scale="width", trim = FALSE) + 
+  geom_boxplot(width=0.03, fill="white") + 
+  coord_cartesian(ylim = c(25,275)) +
+  theme(legend.position = "none")
+
+grid.arrange(x,y,z,a,k,b,
+             ncol = 2, 
+             top="Red, Green, and Blue Pixel Distribution in Training/Holdout Datasets")
+```
+
+Based on this criteria, "V8" was deteremined to be Red, "V9" Green, and "V10" Blue.
+```{r}
+#Transforming variable names
+colnames(holdout) <- c("Red","Green","Blue", "Class")
+holdout$Class <- as.factor(holdout$Class)
+levels(holdout$Class)
+```
+
+# Model Training
+
+## Set-up 
+I first set the levels of the target variable, Class, to 0 (reference class) = Nontarp and 1 = Tarp in order to properly train the models using a binary outcome framework. Then I utilized createFolds and trainControl of the caret package to create reproducible folds for cross-validation. Having identical folds will allow me to more easily compare my models. 
+
+```{r}
+
+pixtrain$Class <- as.factor(pixtrain$Class) #Setting binary levels for class
+levels(pixtrain$Class) #Nontarp = 0, Tarp = 1
+
+set.seed(98) #creating reproducible folds that can be consistent across the different testing methods 
+folds <- createFolds(pixtrain$Class, 
+                     k = 10, 
+                     returnTrain = TRUE) #creating folds with K = 10 for 10-fold cross-validation
+
+train_control <- trainControl(method="cv", 
+                              number=10, 
+                              index = folds,
+                              savePredictions=TRUE, 
+                              classProbs = TRUE) 
+#we want to save the predictions so we can compare them later in the results chart
+#and use the folds created above each time
+```
+10 roughly equal-sized folds were created for cross-fold validation. Predictions will be saved and folds will be held constant between model types using trainControl to ensure that the optimal threshold and performance metric values such as accuracy will remain consistent.
+
+## Logistic Regression
+
+A logistic regression model was fit using all 3 predictors.
+```{r, cache=TRUE}
+library(MASS)
+library(car)
+library(boot)
+```
+
+```{r}
+cvreg = train(form = Class ~., 
+              data = pixtrain,
+              trControl = train_control,
+              method = "glm",
+              family = "binomial")
+summary(cvreg)
+```
+
+It makes sense that the Red and Green variables have a negative estimated value, while blue (the color of the tarp) has a positive slope.
+
+I used the pROC package to pick an optimal threshold value. The ROC curve from pROC is drawn using results of predicting The ROC is drawn using the prediction scores of the model, where each observation from the training is predicted once. The coords function identifies a maximum accuracy from the ROC plot based on the distance of the ROC points from the top-left corner (where the top-left corner represents 100% accuracy, perfect specificity and sensitivity). The area under the curve is calculated based on this maximum value.
+
+```{r}
+#Plotting ROC Curve in base R/pROC
+#I found this StackOverflow exchange helpful in learning what methods exist for finding AUROC and drawing ROC curves after I'd found the pred table within my cvreg model: https://stackoverflow.com/a/30366471
+#I used the pROC documentation for help with understanding how to use this method of finding AUROC and the other metrics without so much manual work/hardcoding: https://www.rdocumentation.org/packages/pROC/versions/1.17.0.1/topics/coords
+#The caret book http://topepo.github.io/caret/ helped me understand the methodology behind the caret functions/settings
+
+library(pROC)
+
+#Training Data
+regroc <- roc(predictor = cvreg$pred$Tarp, 
+              response = cvreg$pred$obs)
+regrocplot <- plot(regroc, xlim=c(1,0))
+aucreg <- auc(regroc)
+
+#Optimizing threshold value using pROC
+reg.coords <- coords(regrocplot, x="best",
+                        best.method="closest.topleft",
+                        ret=c("threshold","accuracy","tpr",
+                              "fpr","fnr","precision"))
+#Holdout Data
+regpreds_holdout <-predict(cvreg, 
+                  newdata = holdout,
+                  type = "prob")
+regroc_holdout <- roc(predictor = regpreds_holdout$Tarp, 
+              response = holdout$Class)
+aucreg_holdout <- auc(regroc_holdout)
+
+#Optimizing threshold value using pROC
+reg.coords_holdout <- coords(regroc_holdout, 
+                     x="best",
+                     best.method="closest.topleft",
+                     ret=c("threshold","accuracy","tpr","fpr",
+                           "fnr","precision"))
+reg.coords
+reg.coords_holdout
+```
+The optimal threshold selected is p=.0419, and the area under the curve is 0.9199.  This indicates that at its optimal threshold, the model can distinguish between the Tarp and NonTarp classes about 99.1% of the time. I was concerned about multicollinearity with the 3 variables, but surprisingly, there was no test loss of accuracy, and the false positive and negative rates were low.
+
+## LDA
+
+All of my models going forward will utilize similar caret train method and pROC performance metric calculations as seen in the regression section. 
+
+Since the LDA and QDA are subject to biased estimations with high multicollinearity (similar to the logistic regression above), I have used only the Red and Green variables to predict membership in the Tarp class. 
+
+```{r}
+#model training and confusion matrix via caret
+cvlda = train(form = Class ~., 
+              data = pixtrain,
+              trControl = train_control,
+              method = "lda",
+              family = "binomial" )
+confusionMatrix.train(cvlda, norm = "none")
+```
+###Threshold
+```{r}
+#Training Data
+ldaroc <- roc(predictor = cvlda$pred$Tarp, 
+              response = cvlda$pred$obs)
+ldarocplot <- plot(ldaroc, xlim=c(1,0))
+auclda <- auc(ldaroc)
+#Optimizing threshold value using pROC
+lda.coords <- coords(ldarocplot, x="best",
+                        best.method="closest.topleft",
+                        ret=c("threshold","accuracy","tpr",
+                              "fpr","fnr","precision"))
+
+#Holdout Data
+ldapreds_holdout <-predict(cvlda, 
+                  newdata = holdout, 
+                  type = "prob")
+ldaroc_holdout <- roc(predictor = ldapreds_holdout$Tarp, 
+              response = holdout$Class)
+auclda_holdout <- auc(ldaroc_holdout)
+
+#Optimizing threshold value using pROC
+lda.coords_holdout <- coords(ldaroc_holdout, 
+                     x="best",
+                     best.method="closest.topleft",
+                     ret=c("threshold","accuracy","tpr","fpr",
+                           "fnr","precision"))
+
+```
+
+
+## QDA
+
+As with the LDA and logistic regression, the QDA model is built using Class = B0 + B2x2 + B3x3 + E, with all independent variables.
+
+```{r}
+#model training/confusion matrix using caret
+cvqda = train(form = Class ~ ., 
+              data = pixtrain,
+              trControl = train_control,
+              method = "qda",
+              family = "binomial" )
+confusionMatrix.train(cvqda, norm = "none")
+```
+
+###Threshold
+```{r}
+#Training Data
+qdaroc <- roc(predictor = cvqda$pred$Tarp, 
+              response = cvqda$pred$obs)
+qdarocplot <- plot(qdaroc, xlim=c(1,0))
+aucquda <- auc(qdaroc)
+
+#Optimizing threshold value using pROC
+qda.coords <- coords(qdarocplot, x="best",
+                        best.method="closest.topleft",
+                        ret=c("threshold","accuracy","tpr",
+                              "fpr","fnr","precision"))
+
+#Holdout Data
+qdapreds_holdout <-predict(cvqda, 
+                  newdata = holdout, 
+                  type = "prob")
+qdaroc_holdout <- roc(predictor = qdapreds_holdout$Tarp, 
+              response = holdout$Class)
+aucqda_holdout <- auc(qdaroc_holdout)
+
+#Optimizing threshold value using pROC
+qda.coords_holdout <- coords(qdaroc_holdout, 
+                     x="best",
+                     best.method="closest.topleft",
+                     ret=c("threshold","accuracy","tpr","fpr",
+                           "fnr","precision"))
+```
+
+## KNN
+
+Since the KNN and elastic net are more flexible (nonparametric) methods with less sensitivity to multicollinearity, I have left all 3 variables in the model, rather than only using Red and Green.
+Note: Since the code for the KNN has not been changed since my first submission, I've saved the output as an .rds file and loaded it in order to save memory when knitting the .Rmd file. A backslash (\) was placed before and after the R Markdown coding block header/footer to prevent the code from being ran while knitting without losing visibility of the code. A similar format will be used for other computationally expensive models.
+
+\```{r}
+#training and confusion matrix using caret
+cvknn = train(form = Class ~ ., 
+              data = pixtrain,
+              trControl = train_control,
+              method = "knn",
+              tuneLength=50,
+              prob=TRUE)
+confusionMatrix.train(cvknn, norm="none")
+saveRDS(cvknn,"KNNTune.rds")
+\```
+
+###Optimizing Threshold
+```{r}
+#Loading .rds file of model results
+cvknn <- readRDS("KNNTune.rds", refhook = NULL)
+
+#Training Data
+knnroc <- roc(predictor = cvknn$pred$Tarp, 
+              response = cvknn$pred$obs)
+knnrocplot <- plot(knnroc, xlim=c(1,0))
+aucknn <- auc(knnroc)
+
+#Optimizing threshold value using pROC
+knn.coords <- coords(knnrocplot, x="best",
+                        best.method="closest.topleft",
+                        ret=c("threshold","accuracy","tpr",
+                              "fpr","fnr","precision"))
+#Holdout Data
+knnpreds_holdout <-predict(cvknn, 
+                  newdata = holdout, 
+                  type = "prob")
+knnroc_holdout <- roc(predictor = knnpreds_holdout$Tarp, 
+              response = holdout$Class)
+aucknn_holdout <- auc(knnroc_holdout)
+
+#Optimizing threshold value using pROC
+knn.coords_holdout <- coords(knnroc_holdout, 
+                     x="best",
+                     best.method="closest.topleft",
+                     ret=c("threshold","accuracy","tpr","fpr",
+                           "fnr","precision"))
+
+```
+
+###Tuning Parameter $k$
+
+The tuning parameter was chosen via the train method of the caret package, which maximizes the accuracy (defined as the count of true negatives and true positives divided by the count of all observations). The plot of number of neighbors vs. accuracy shows an overall negative trend, with a higher K value tending toward lower accuracy. However, looking at the y-axis, these differences are very, very small--the maximum accuracy rate (k=5) is 99.74%, and the minimum (k=43) is 99.67%.
+
+Fifty potential values for k were tested due to computing limitations. Since the accuracy estimates remained stable (within about .10%) across the 50 values tested, I did not attempt to set k equal to sqrt(n), which was over 200.  
+
+```{r}
+plot(cvknn)
+cvknn
+```
+
+##Penalized Logistic Regression (ElasticNet)
+
+Similar to the K-Nearest Neighbors model, all three variables are used in the model, since nonparametric measures are not as sensitive to multicollinearity. Alpha tends to be either 0 or 1. Since lambda tends to be very small, I chose 1e^-12 as the minimum value, and 1e^-4 as the maximum, with 30 values tested to ensure optimal performance.
+```{r}
+#I used the caret book (https://daviddalpiaz.github.io/r4sl/elastic-net.html) to understand the methodology bethind the caret/glmnet tuning parameters
+
+netGrid <- expand.grid(alpha = 0:1, 
+                       lambda = seq(
+                         0.000000000001, 0.0001, length = 30
+                         ))
+```
+
+###Fitting
+```{r}
+library("glmnet")
+
+cvnet = train(form = Class ~ ., 
+              data = pixtrain,
+              trControl = train_control, 
+              tuneGrid = netGrid, 
+              method = "glmnet")
+
+saveRDS(cvnet,"GLMNetTune.rds")
+```
+
+###Tuning Parameters
+
+Caret uses the glmnet package to perform the elastic net penalized regression. The alpha and lambda values are chosen based on the average accuracy of each of the 10 folds.
+
+```{r}
+cvnet
+plot(cvnet)
+```
+As alpha = 1, the lasso method was chosen.  Additionally, there was a small amount of shrinkage of the coefficients, as indicated by the lambda value of .00002759.  
+
+###Threshold Selection
+
+The threshold selection was completed using pROC using the top-left maximum, similar to the other models.
+```{r}
+cvnet <- readRDS("GLMNetTune.rds")
+#Training Data
+netroc <- roc(predictor = cvnet$pred$Tarp, 
+              response = cvnet$pred$obs)
+netrocplot <- plot(netroc, xlim=c(1,0))
+aucnet <- auc(netroc)
+
+#Optimizing threshold value using pROC
+net.coords <- coords(netrocplot, x="best",
+                        best.method="closest.topleft",
+                        ret=c("threshold","accuracy","tpr",
+                              "fpr","fnr","precision"))
+
+#Holdout Data
+netpreds_holdout <-predict(cvnet, 
+                  newdata = holdout, 
+                  type = "prob")
+netroc_holdout <- roc(predictor = netpreds_holdout$Tarp, 
+              response = holdout$Class)
+aucnet_holdout <- auc(netroc_holdout)
+
+#Optimizing threshold value using pROC
+net.coords_holdout <- coords(netroc_holdout, 
+                     x="best",
+                     best.method="closest.topleft",
+                     ret=c("threshold","accuracy","tpr","fpr",
+                           "fnr","precision"))
+```
+
+
+##Random Forest
+
+###Tuning Parameters
+Parameter tuning was done using a model matrix generated by the expand.grid() function of caret.  Since there are 3 independent variables, the value of mtry (the number of variables sampled at each split) could only be 1, 2, or 3, so all three values were tested in each random forest model. Small node size values were chosen for deeper trees (and hopefuly, better performance). Both built-in split rules (Gini impurity and extraTrees, which mimics extremely randomized trees models) were tested.  The models were trained using the caret train module, with the random forest method from the package ranger. Ranger was chosen over e1071 due to computational efficiency. The model was trained with 500 trees in an attempt to control for computation time while also allowing for sufficient training.  
+
+```{r}
+library(randomForest)
+library(mlbench)
+library(e1071)
+
+rfgrid <-  expand.grid(mtry = 1:3,
+                       min.node.size = 1:3,
+                       splitrule = c("gini", "extratrees"))
+
+set.seed(825)
+rfFit <- train(Class ~ ., 
+               data = pixtrain, 
+               method = "ranger",
+               num.tree = 500,
+               trControl = train_control, 
+               tuneGrid = rfgrid)
+rfFit
+plot(rfFit)
+saveRDS(rfFit, "RFTune.rds")
+```
+
+###Threshold Selection
+```{r, threshold and results}
+rfFit <- readRDS("RFTune.rds")
+#Training Data
+confusionMatrix(rfFit$pred$pred, rfFit$pred$obs)
+
+rfroc <- roc(predictor = rfFit$pred$Tarp, 
+             response = rfFit$pred$obs)
+rfrocplot <- plot(rfroc)
+aucrf <- auc(rfroc)
+aucrf
+
+#Optimizing threshold value using pROC
+rf.coords <- coords(rfroc, 
+                     x="best",
+                     best.method="closest.topleft",
+                     ret=c("threshold","accuracy","tpr","fpr",
+                           "fnr","precision"))
+#Holdout Data
+rfpreds_holdout <-predict(rfFit, 
+                  newdata = holdout, 
+                  type = "prob")
+rfroc_holdout <- roc(predictor = rfpreds_holdout$Tarp, 
+              response = holdout$Class)
+aucrf_holdout <- auc(rfroc_holdout)
+
+#Optimizing threshold value using pROC
+rf.coords_holdout <- coords(rfroc_holdout, 
+                     x="best",
+                     best.method="closest.topleft",
+                     ret=c("threshold","accuracy","tpr","fpr",
+                           "fnr","precision"))
+```
+
+
+##SVM Model Fitting
+###Linear SVM
+####Parameter Tuning
+The only tuneable parameter in a linear SVM is cost, the penalty for misclassification of a support vector. I chose a wide range of 20 values for C cost to train. Values were tested using the train feature of caret.
+```{r}
+lineargrid <- expand.grid(C=seq(1,20,length=20))
+```
+
+####Model Fitting
+\```{r}
+svmpix <- train(Class~., 
+                data=pixtrain, 
+                method = "svmLinear", #linear kernel
+                trControl = train_control, 
+                tuneGrid = lineargrid,
+                probability=TRUE
+              )
+saveRDS(svmpix, "SVMLinearTune.rds")
+plot(svmpix)
+\```
+
+####Threshold Selection
+```{r}
+svmpix <- readRDS("SVMLinearTune.rds")
+
+#Training Data
+linroc <- roc(predictor = svmpix$pred$Tarp, 
+              response = svmpix$pred$obs)
+linrocplot <- plot(linroc, xlim=c(1,0))
+auclin <- auc(linroc)
+
+#Optimizing threshold value using pROC
+lin.coords <- coords(linrocplot, x="best",
+                        best.method="closest.topleft",
+                        ret=c("threshold","accuracy","tpr",
+                              "fpr","fnr","precision"))
+
+#Holdout Data
+linpreds_holdout <-predict(svmpix, 
+                  newdata = holdout,
+                  decision.values=TRUE,
+                  probability=TRUE)
+linpreds_holdout <- ordered(linpreds_holdout, levels=c("NonTarp", "Tarp"))
+linpreds_holdout <- (as.numeric(linpreds_holdout)-1)
+linroc_holdout <- roc(predictor = as.numeric(linpreds_holdout), 
+              response = holdout$Class)
+auclin_holdout <- auc(linroc_holdout)
+
+#Optimizing threshold value using pROC
+lin.coords_holdout <- coords(linroc_holdout, 
+                     x="best",
+                     best.method="closest.topleft",
+                     ret=c("threshold","accuracy","tpr","fpr",
+                           "fnr","precision"))
+```
+
+###Polynomial SVM
+####Tuning
+Tuning parameter C was again tested on a range of 20 values. For polynomial degree, degrees 1 through 5 were chosen to see the effects of increased flexibility of the decision boundary and margin. Scale factor was set to 1 because the variables all use the same units and have overlapping distributions.
+```{r}
+polygrid <- expand.grid(C=seq(1,20,length=20))
+deg <- seq(1,5,length=5)
+s <- 1
+```
+
+####Model Fitting
+\```{r}
+svmpix2 <- train(Class~., 
+                 data=pixtrain, 
+                 method = "svmPoly", 
+                 trControl = train_control, 
+                 tuneGrid = polygrid,
+                   degree = deg,
+                   scale= s,
+                   probability=TRUE)
+saveRDS(svmpix2, "SVMPolyTune.rds")
+svmpix2
+plot(svmpix2)
+\```
+
+####Threshold Selection
+```{r}
+svmpix2 <- readRDS("SVMPolyTune.rds")
+
+#Training Data
+polroc <- roc(predictor = svmpix2$pred$Tarp, 
+              response = svmpix2$pred$obs)
+polrocplot <- plot(polroc, xlim=c(1,0))
+aucpol <- auc(polroc)
+
+#Optimizing threshold value using pROC
+pol.coords <- coords(polrocplot, x="best",
+                        best.method="closest.topleft",
+                        ret=c("threshold","accuracy","tpr",
+                              "fpr","fnr","precision"))
+#Holdout Data
+polpreds_holdout <-predict(svmpix2, 
+                  newdata = holdout, 
+                  type = "prob")[,2]
+
+polroc_holdout <- roc(predictor = polpreds_holdout, 
+              response = holdout$Class)
+aucpol_holdout <- auc(polroc_holdout)
+
+#Optimizing threshold value using pROC
+pol.coords_holdout <- coords(polroc_holdout, 
+                     x="best",
+                     best.method="closest.topleft",
+                     ret=c("threshold","accuracy","tpr","fpr",
+                           "fnr","precision"))
+```
+##Radial Basis Function SVM
+###Tuning
+A grid search was first performed with a large range of values for C cost, and random selection of 6 values for sigma (which is also referred to as 'gamma' in scikit-learn and other Python/R packages), which denotes the amount of influence a training point has on classification of other points. A larger value indicates the radius of influence around a single training point will be bigger. Based on the results of the original random grid search, sigma was tuned again using  values from 5 to 10. The range for cost was also narrowed to 6 values between 10 and 20. For efficiency, output of both of these models have been saved in .rds files and reports are displayed here.
+
+\```{r}
+expand.grid(C = seq(0, 2, length = 20))
+svmpix3 <- train(Class~., 
+                 data=pixtrain, 
+                 method = "svmRadialSigma", 
+                 trControl = train_control, 
+                 tuneLength=6) #max tunelength for RBF kernel
+saveRDS(svmpix3, "SVMRadialTune.rds")
+plot(svmpix3)
+svmpix3
+ggplot(svmpix3) + theme(legend.position = "top")
+
+#Re-tune
+tune_grid_svm <- expand.grid(C = seq(10, 20, length = 6), 
+                             sigma=seq(5, 10, length =6)) #max tunelength for this kernel is 6
+\```
+
+###Fitting the Model
+\```{r}
+svmpix4 <- train(Class~., 
+                 data=pixtrain, 
+                 method = "svmRadialSigma", 
+                 trControl = train_control, 
+                 tuneGrid = tune_grid_svm)
+
+saveRDS(svmpix4, "SVMRadialTune2.rds")
+svmpix4
+plot(svmpix4)
+\```
+
+####Threshold
+```{r}
+svmpix4 <- readRDS("SVMRadialTune2.rds")
+
+#Training Data
+radroc <- roc(predictor = svmpix4$pred$Tarp, 
+              response = svmpix4$pred$obs)
+radrocplot <- plot(radroc, xlim=c(1,0))
+aucrad <- auc(radroc)
+
+#Optimizing threshold value using pROC
+rad.coords <- coords(radroc, x="best",
+                        best.method="closest.topleft",
+                        ret=c("threshold","accuracy","tpr",
+                              "fpr","fnr","precision"))
+
+#Holdout Data
+radpreds_holdout <-predict(svmpix4, 
+                  newdata = holdout, 
+                  type = "prob")[,2]
+
+radroc_holdout <- roc(predictor = radpreds_holdout, 
+              response = holdout$Class)
+aucrad_holdout <- auc(radroc_holdout)
+
+#Optimizing threshold value using pROC
+rad.coords_holdout <- coords(radroc_holdout, 
+                     x="best",
+                     best.method="closest.topleft",
+                     ret=c("threshold","accuracy","tpr","fpr",
+                           "fnr","precision"))
+```
+
+#Results
+
+##Cross-Validation
+
+```{r}
+#table row names
+Models <- as.matrix(c(
+  "Logistic Regression", "LDA", "QDA", "KNN","Penalized Log Reg",
+  "Random Forest","SVM - Linear","SVM - Polynomial", "SVM - RBF"
+  ))
+
+#table column names
+cols <- list("Threshold","Accuracy","TPR","FPR",
+                           "FNR","Precision")
+
+#binding result coordinates data from ROC curves
+results <- rbind(reg.coords, lda.coords, qda.coords, knn.coords, 
+                 net.coords, rf.coords, lin.coords, pol.coords,
+                 rad.coords)
+
+#formatting dataframe
+row.names(results) <- Models
+th <- results$threshold
+
+#putting threshold in a separate df
+results <- results[,-1]
+
+#Making rows of tuning df
+tunelog <- c("NA", th[1],aucreg)
+ldalog <- c("NA", th[2], auclda)
+qdalog <- c("NA", th[3], aucquda)
+knnlog <- c("k=5", th[4], aucknn)
+netlog <- c("alpha=1, lambda=.0000276", th[5], aucnet)
+rflog <- c("mtry=2, nodesize=1, ntree=500", th[6], aucrf)
+linlog <- c("C=3", th[7], auclin)
+pollog <- c("C=19, degree=5", th[8], aucpol)
+radlog <- c("C=20, sigma=9", th[9], aucrad)
+
+param <- data.frame(rbind(tunelog,ldalog,
+                          qdalog,knnlog,
+                          netlog,rflog,linlog,
+                          pollog,radlog))
+row.names(param) <- Models
+names(param) <- c("Tuning Parameters", "Threshold", "AUC")
+
+
+print(results)
+print(param)
+```
+
+##Holdout (Test) Data
+
+```{r}
+#binding result coordinates data from ROC curves
+results_holdout <- rbind(reg.coords_holdout, lda.coords_holdout, 
+                 qda.coords_holdout, knn.coords_holdout, 
+                 net.coords_holdout, rf.coords_holdout, 
+                 lin.coords_holdout, pol.coords_holdout,
+                 rad.coords_holdout)
+
+#formatting dataframe
+row.names(results_holdout) <- Models
+names(results_holdout) <- cols
+
+#putting threshold in a separate df
+param_holdout <- results_holdout$Threshold
+results_holdout <- results_holdout[,-1]
+
+#Making rows of tuning df
+tunelog_h <- c("NA", th[1],aucreg_holdout)
+ldalog_h <- c("NA", th[2], auclda_holdout)
+qdalog_h <- c("NA", th[3], aucqda_holdout)
+knnlog_h <- c("k=5", th[4], aucknn_holdout)
+netlog_h <- c("alpha=1, lambda=.0000276", th[5], aucnet_holdout)
+rflog_h <- c("mtry=2, nodesize=1, ntree=500", th[6], aucrf_holdout)
+linlog_h <- c("C=3", th[7], auclin_holdout)
+pollog_h <- c("C=19, degree=5", th[8], aucpol_holdout)
+radlog_h <- c("C=20, sigma=9", th[9], aucrad_holdout)
+
+param_holdout <- data.frame(rbind(tunelog_h,ldalog_h,
+                          qdalog_h,knnlog_h,
+                          netlog_h,rflog_h,linlog_h,
+                          pollog_h,radlog_h))
+row.names(param_holdout) <- Models
+names(param_holdout) <- c("Tuning Parameters", "Threshold", "AUC")
+
+print(results_holdout)
+print(param_holdout)
+```
+
+# Conclusions
+
+## Conclusion \#1 
+Overall, the best-performing models on the cross-validation set were the radial basis function SVM, k-Nearest Neighbors, and random forest, each with an accuracy rate of over 99%.  However, the best-performing models on the holdout testing set were elastic net (penalized logistic regression) logistic regression, and linear SVM.  It’s notable that the higher bias models ended up showing a significant advantage over those with much higher flexibility.
+
+## Conclusion \#2
+The addition of the holdout testing dataset resulted in some testing loss for more flexible models such as the QDA and 5th degree polynomial SVM. Since these models tend to have a higher variance than similar models like LDA and linear or radial basis function SVM, it is understandable that the cross-validated performance measures were significantly different than the holdout testing dataset, even if the differences surprised me.
+
+## Conclusion \#3
+Based on the holdout testing results, the elastic net is the clear winner, with the highest accuracy, true positive and negative rates, and lowest false positive and negative rates.  It can also be trained relatively quickly, and doesn’t require as much memory as random forest or the SVM models, which makes it a good candidate to use in a high-stakes disaster rescue situation.  In this case, the prediction performance is more important than interpretability, so choosing a simpler logistic regression would not have any advantages over the penalized model.
+
+## Conclusion \#4
+In this scenario, it is of the utmost importance to maximize true positives and true negatives, and to minimize false positives and false negatives. A false prediction of tarp when an object is vegetation will result in wasted time/resources, which could impact the number of lives rescue teams are able to save. And yet, raising the classification too much increases the likelihood that a genuine tarp indicating a makeshift shelter will be missed, and its inhabitants will not get the support and resources they need to survive the earthquake’s aftermath. While the maximum accuracy of each model was used as a metric of performance, there could be many potential ways to reward correct predictions and penalize incorrect guesses in order to optimize the models to a desired standard. Additional predictors could assist with this goal--it may make sense to lower the classification threshold in geographic areas that are known to have a higher population density, for example, or to raise it in areas that are known to not be habitable due to natural features.
+
+Another interesting metric to consider is the decision threshold.  As mentioned in the earlier discussion, the more flexible models showed a higher amount of testing loss, which could reflect overfitting of the training dataset.  I noticed that the threshold values for identifying a tarp tended to be lower in the models that showed lower testing accuracy (including LDA, QDA, and RBF SVM, with polynomial SVM being an exception to this).  It may be possible that in these cases, the NonTarp class in particular was overfit, such that even a very small probability was then considered to be a Tarp.  This is supported by substantially higher false positive rates in the four lowest-performing models than the top three. 
+
+## Conclusion \#5
+Further tuning of the linear models, random forest, and SVM kernels could incorporate minority oversampling or majority undersampling in the training set, or use weights for the two classes. This would prevent the imbalance in our Tarp/NonTarp classes from negatively impacting the performance of the classifier. Since nearly 97% of our sample is of NonTarp objects, the linear models may not have enough cases of Tarps to properly characterize its distribution. The biased estimation of the distribution of the Tarps class could then impact the accuracy of the model’s predictions. Even though both random forest and SVM techniques are known as being a sort of gold standard of machine learning, both perform suboptimally on highly imbalanced datasets such as this set of pixel metadata. As mentioned in the discussion about performance metrics, each incorrect classification has the potential to result in worse outcomes, including additional suffering and death.  Additionally, the testing dataset was over 2 million observations, so even slight increases in accuracy could reflect many more shelters being successfully located, each with one or more earthquake survivors needing assistance. For these reasons, future analyses should consider employing over- or under-sampling to augment one of the higher-performing models.
+
+
