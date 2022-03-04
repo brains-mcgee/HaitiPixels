@@ -392,9 +392,10 @@ qda.coords_holdout <- coords(qdaroc_holdout,
 ## KNN
 
 Since the KNN and elastic net are more flexible (nonparametric) methods with less sensitivity to multicollinearity, I have left all 3 variables in the model, rather than only using Red and Green.
-Note: Since the code for the KNN has not been changed since my first submission, I've saved the output as an .rds file and loaded it in order to save memory when knitting the .Rmd file. A backslash (\) was placed before and after the R Markdown coding block header/footer to prevent the code from being ran while knitting without losing visibility of the code. A similar format will be used for other computationally expensive models.
 
-\```{r}
+Note: For all computationally expensive models, I've included a saveRDS command to retain the model training output. Once the model has been tuned, the code block for training can be commented out, and the output can be loaded using readRDS so that performance metrics can be calculated. This is done to save time when knitting the final R Markdown notebook. If the model is tuned again at any time, you will need to run the model training and save the new output to reflect those changes.
+
+```{r}
 #training and confusion matrix using caret
 cvknn = train(form = Class ~ ., 
               data = pixtrain,
@@ -404,7 +405,7 @@ cvknn = train(form = Class ~ .,
               prob=TRUE)
 confusionMatrix.train(cvknn, norm="none")
 saveRDS(cvknn,"KNNTune.rds")
-\```
+```
 
 ###Optimizing Threshold
 ```{r}
@@ -589,7 +590,7 @@ lineargrid <- expand.grid(C=seq(1,20,length=20))
 ```
 
 ####Model Fitting
-\```{r}
+```{r}
 svmpix <- train(Class~., 
                 data=pixtrain, 
                 method = "svmLinear", #linear kernel
@@ -599,7 +600,7 @@ svmpix <- train(Class~.,
               )
 saveRDS(svmpix, "SVMLinearTune.rds")
 plot(svmpix)
-\```
+```
 
 ####Threshold Selection
 ```{r}
@@ -646,7 +647,7 @@ s <- 1
 ```
 
 ####Model Fitting
-\```{r}
+```{r}
 svmpix2 <- train(Class~., 
                  data=pixtrain, 
                  method = "svmPoly", 
@@ -658,7 +659,7 @@ svmpix2 <- train(Class~.,
 saveRDS(svmpix2, "SVMPolyTune.rds")
 svmpix2
 plot(svmpix2)
-\```
+```
 
 ####Threshold Selection
 ```{r}
@@ -695,7 +696,7 @@ pol.coords_holdout <- coords(polroc_holdout,
 ###Tuning
 A grid search was first performed with a large range of values for C cost, and random selection of 6 values for sigma (which is also referred to as 'gamma' in scikit-learn and other Python/R packages), which denotes the amount of influence a training point has on classification of other points. A larger value indicates the radius of influence around a single training point will be bigger. Based on the results of the original random grid search, sigma was tuned again using  values from 5 to 10. The range for cost was also narrowed to 6 values between 10 and 20. For efficiency, output of both of these models have been saved in .rds files and reports are displayed here.
 
-\```{r}
+```{r}
 expand.grid(C = seq(0, 2, length = 20))
 svmpix3 <- train(Class~., 
                  data=pixtrain, 
@@ -710,10 +711,10 @@ ggplot(svmpix3) + theme(legend.position = "top")
 #Re-tune
 tune_grid_svm <- expand.grid(C = seq(10, 20, length = 6), 
                              sigma=seq(5, 10, length =6)) #max tunelength for this kernel is 6
-\```
+```
 
 ###Fitting the Model
-\```{r}
+```{r}
 svmpix4 <- train(Class~., 
                  data=pixtrain, 
                  method = "svmRadialSigma", 
@@ -723,7 +724,7 @@ svmpix4 <- train(Class~.,
 saveRDS(svmpix4, "SVMRadialTune2.rds")
 svmpix4
 plot(svmpix4)
-\```
+```
 
 ####Threshold
 ```{r}
